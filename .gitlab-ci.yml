@@ -1,0 +1,196 @@
+# This CI File creates one compile stage on commit and 4 stage Build-Deploy workflow if triggered through 'Schedule' with variable PIPELINE_MODE=LLE_DEPLOYMENT.
+
+stages:
+  - Compile
+  - Build
+  - Test
+  - Release
+  - Deploy
+
+workflow:
+  rules:
+    - if: $CI_DEFAULT_BRANCH =~ /main/
+      variables:
+        VAR1: "main"
+    - if: $CI_DEFAULT_BRANCH =~ /abcd/
+      variables:
+        VAR1: "abcd"
+
+cache:  
+  paths:
+    - .m2/repository/
+    - target/
+
+before_script:
+    - echo "Identify The Environment Here. Will not be called for stages with their own before_script."
+    - printenv | sort
+
+.setup:
+  compile_setup:
+    - echo "Setup Compile Dependencies Here."
+  build_setup:
+    - echo "Setup Build Dependencies Here."
+  test_setup:
+    - echo "Setup Test Dependencies Here."
+  release_setup:
+    - echo "Setup Release Dependencies Here."
+  deploy_setup:
+    - echo "Setup Deploy Dependencies Here."
+
+.parameterized_ci:
+  script:
+    - ./scripts/gitlab-ci.sh ${STAGE} ${ENVIRONMENT}
+
+.stage_parent:
+  tags:
+    - shared-runner
+  script:
+    - echo "Stage Called. STAGE = ${STAGE}, ENVIRONMENT = ${ENVIRONMENT}"
+    - !reference [.parameterized_ci, script]
+
+Non-Main Branch Compile:
+  stage: Compile
+  extends: .stage_parent
+  when: on_success
+  # only: # Cant use along with rules.
+  #   - branches # Compile all branches including 'main'.
+  variables:
+    STAGE: COMPILE
+  rules:
+    - if: $CI_DEFAULT_BRANCH !~ /main/ && $CI_PIPELINE_SOURCE !~ /schedule/ # No Execution For main Branch.
+
+Merge Compile:
+  stage: Compile
+  extends: .stage_parent
+  when: on_success
+  only:
+    - merge_requests # Trigger only for merge requests.
+  variables:
+    STAGE: COMPILE
+  # before_script:
+  #   - !reference [.setup, compile_setup]
+
+Main Branch Compile:
+  stage: Compile
+  extends: .stage_parent
+  when: on_success
+  # only: # Cant use along with rules.
+  #   - branches # Compile all branches including 'main'.
+  variables:
+    STAGE: COMPILE
+  rules:
+    - if: $CI_DEFAULT_BRANCH =~ /main/ && $CI_PIPELINE_SOURCE !~ /schedule/ # Main Branch Compile For Every Commit.
+
+Main Branch Build:
+  stage: Build
+  extends: .stage_parent
+  when: on_success
+  # only: # Cant use along with rules.
+  #   - main # Build runs only on main branch.
+  variables:
+    STAGE: BUILD
+  before_script:
+    - !reference [.setup, build_setup]
+  artifacts: # Artifact to be made available to the next job.
+    paths:
+      - ./target/artifact-*.jar
+    reports:
+      dotenv: release.env
+  script:
+    - echo "Overridden Build Stage"
+    - echo "TARGET_FILE_NAME=${TARGET_FILE_NAME}" >> ./release.env
+  rules:
+    - if: $CI_DEFAULT_BRANCH =~ /main/ && $CI_PIPELINE_SOURCE =~ /schedule/ && $PIPELINE_MODE =~ /LLE_DEPLOYMENT/
+    # Build runs only on main branch.
+    # Pipeline was ran through 'Schedules' on GitLab.
+    # Only For Lower Level Environment Deployment.
+
+Integration Test:
+  stage: Test
+  extends: .stage_parent
+  when: on_success
+  variables:
+    STAGE: INTEGRATION_TEST
+  before_script:
+    - !reference [.setup, test_setup]
+  rules:
+    - if: $CI_PIPELINE_SOURCE =~ /schedule/ && $PIPELINE_MODE =~ /LLE_DEPLOYMENT/
+    # Pipeline was ran through 'Schedules' on GitLab.
+    # Only For Lower Level Environment Deployment.
+
+Release:
+  stage: Release
+  extends: .stage_parent
+  when: manual
+  variables:
+    STAGE: RELEASE
+  # before_script:
+  #   - !reference [.setup, release_setup]
+  script:
+    - echo "Custom Release Stage Called."
+    # - !reference [.parameterized_ci, script]
+  rules:
+    - if: $CI_PIPELINE_SOURCE =~ /schedule/ && $PIPELINE_MODE =~ /LLE_DEPLOYMENT/
+    # Pipeline was ran through 'Schedules' on GitLab.
+    # Only For Lower Level Environment Deployment.
+
+.deploy_parent:
+  stage: Deploy
+  extends: .stage_parent
+  script:
+    - echo ${VAR1}
+    - echo ${ENVIRONMENT}
+    - echo ${AWS_ROLE_NAME}
+    - echo ${AWS_ACCOUNT_ID}
+
+1. Deploy on DEV [Deployment - Auto]:
+  stage: Deploy
+  extends: .deploy_parent
+  when: on_success # Run deployment on DEV immediately after Test Stage
+  variables:
+    STAGE: DEPLOY
+    ENVIRONMENT: DEV
+    AWS_ROLE_NAME: dev-role
+    AWS_ACCOUNT_ID: dev-account
+  # before_script:
+  #   - !reference [.setup, deploy_setup]
+  rules:
+    - if: $CI_PIPELINE_SOURCE =~ /schedule/ && $PIPELINE_MODE =~ /LLE_DEPLOYMENT/
+    # Pipeline was ran through 'Schedules' on GitLab.
+    # Only For Lower Level Environment Deployment.
+
+2. Deploy on UAT [Deployment - On Release]:
+  stage: Deploy
+  extends: .deploy_parent
+  when: on_success
+  needs:
+    - Release # Run deployment on UAT immediately after Release is successful.
+  variables:
+    STAGE: DEPLOY
+    ENVIRONMENT: UAT
+    AWS_ROLE_NAME: uat-role
+    AWS_ACCOUNT_ID: uat-account
+  # before_script:
+  #   - !reference [.setup, deploy_setup]
+  rules:
+    - if: $CI_PIPELINE_SOURCE =~ /schedule/ && $PIPELINE_MODE =~ /LLE_DEPLOYMENT/
+    # Pipeline was ran through 'Schedules' on GitLab.
+    # Only For Lower Level Environment Deployment.
+
+3. Deploy on PRD [Deployment - Manual]:
+  stage: Deploy
+  extends: .deploy_parent
+  when: manual # Do not run UAT before the code gets Released.
+  needs:
+    - Release
+  variables:
+    STAGE: DEPLOY
+    ENVIRONMENT: PRD
+    AWS_ROLE_NAME: prd-role
+    AWS_ACCOUNT_ID: prd-account
+  # before_script:
+  #   - !reference [.setup, deploy_setup]
+  rules:
+    - if: $CI_PIPELINE_SOURCE =~ /schedule/ && $PIPELINE_MODE =~ /LLE_DEPLOYMENT/
+    # Pipeline was ran through 'Schedules' on GitLab.
+    # Only For Lower Level Environment Deployment.
